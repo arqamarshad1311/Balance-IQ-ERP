@@ -63,6 +63,16 @@ Use `--forwarded-allow-ips="*"` only when the app is reachable solely through yo
 | `WLB_ADMIN_PASSWORD` | Password for the first `admin` account (production without it = random one printed once in the log) |
 | `WLB_COOKIE_SECURE=1` | Force Secure cookies when not using `WLB_ENV=production` |
 | `WLB_SEED_DEMO`, `WLB_DEMO_PASSWORD` | Optional demo data on startup |
+| `WLB_ALLOW_REGISTRATION=0` | Turn off public self-registration (default: on) |
+| `WLB_REGISTER_LIMIT` | Max signups per IP per hour (default 5) |
+
+## Self-registration
+
+The login page has a **Create an account** link (`/register.html`). Anyone can sign up, but only as an
+**employee**: the API has no role field, and the server hard-codes `role="employee"`. HR and admin accounts
+can only be created by an admin under **People -> Add person**. Signups are limited per IP
+(`WLB_REGISTER_LIMIT`, in memory, resets on restart). Set `WLB_ALLOW_REGISTRATION=0` to close signups.
+Note that open signup means anyone who finds the URL can create an account and submit assessments, and HR will see them in reports.
 
 ## Roles
 
@@ -76,6 +86,7 @@ Use `--forwarded-allow-ips="*"` only when the app is reachable solely through yo
 ## API (all under /api, cookie session)
 ```
 POST /auth/login  /auth/logout  /auth/change-password     GET /auth/me
+POST /register    (public, employee accounts only)
 POST /predict     GET /my/assessments   GET /my/latest
 GET  /hr/overview /hr/assessments /departments             (hr, admin)
 GET  /employees   POST /employees   PATCH /employees/{id}

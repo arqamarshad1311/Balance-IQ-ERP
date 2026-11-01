@@ -17,11 +17,13 @@ from pathlib import Path
 from typing import Literal, Optional
 import os
 import re
+import time
 
 from fastapi import FastAPI, Depends, HTTPException, Request, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 import auth
@@ -210,6 +212,16 @@ class ResetPasswordIn(BaseModel):
     new_password: Optional[str] = Field(None, max_length=200)   # blank => generated
 
 
+class RegisterIn(BaseModel):
+    username: str = Field(..., min_length=3, max_length=40)
+    full_name: str = Field(..., min_length=2, max_length=100)
+    email: Optional[str] = Field(None, max_length=120)
+    department: str = Field("General", min_length=1, max_length=60)
+    designation: str = Field("", max_length=80)
+    password: str = Field(..., min_length=8, max_length=200)
+    # NOTE: deliberately NO `role` field. Self-registered accounts are always "employee".
+
+
 # ------------------------------ auth routes -------------------------------
 @app.post("/api/auth/login")
 def login(payload: LoginIn, request: Request, response: Response, db: Session = Depends(get_db)):
@@ -257,6 +269,60 @@ def change_password(payload: ChangePasswordIn, response: Response,
     db.commit()
     set_session_cookie(response, user)          # keep THIS browser signed in
     return user_out(user)
+
+
+# ------------------------------ self-registration -------------------------
+ALLOW_REGISTRATION = os.getenv("WLB_ALLOW_REGISTRATION", "1") != "0"
+REGISTER_LIMIT = int(os.getenv("WLB_REGISTER_LIMIT", "5"))      # signups per IP per hour
+_reg_attempts: dict = {}                                        # ip -> [count, window_start]
+
+
+def _rate_limit_register(request: Request):
+    ip = request.client.host if request.client else "?"
+    now = time.time()
+    for k in [k for k, v in _reg_attempts.items() if now - v[1] > 3600]:   # forget old windows
+        del _reg_attempts[k]
+    rec = _reg_attempts.get(ip)
+    if not rec:
+        _reg_attempts[ip] = [1, now]
+        return
+    rec[0] += 1
+    if rec[0] > REGISTER_LIMIT:
+        raise HTTPException(429, "Too many signups from this network. Try again later.")
+
+
+@app.post("/api/register", status_code=201)
+def register(payload: RegisterIn, request: Request, db: Session = Depends(get_db)):
+    """Public self-registration. Always creates a plain employee - never HR or admin."""
+    if not ALLOW_REGISTRATION:
+        raise HTTPException(403, "Self-registration is turned off. Ask your administrator for an account.")
+    _rate_limit_register(request)
+
+    uname = payload.username.strip()
+    if not re.fullmatch(r"[A-Za-z0-9._-]{3,40}", uname):
+        raise HTTPException(400, "Username may only contain letters, digits, '.', '_' and '-'.")
+    if db.query(User).filter(func.lower(User.username) == uname.lower()).first():
+        raise HTTPException(409, "That username is already taken.")
+    if payload.email and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", payload.email):
+        raise HTTPException(400, "Email address looks invalid.")
+    problem = auth.validate_password_strength(payload.password)
+    if problem:
+        raise HTTPException(400, problem)
+
+    u = User(
+        username=uname, full_name=payload.full_name.strip(), email=payload.email or None,
+        department=payload.department.strip() or "General", designation=payload.designation.strip(),
+        role="employee",                         # hard-coded: the client cannot choose a role
+        password_hash=auth.hash_password(payload.password), must_change_password=False,
+    )
+    db.add(u)
+    try:
+        db.commit()
+    except IntegrityError:                       # two people picked the same username at once
+        db.rollback()
+        raise HTTPException(409, "That username is already taken.")
+    db.refresh(u)
+    return {"ok": True, "username": u.username, "role": u.role}
 
 
 # ------------------------------ prediction --------------------------------
